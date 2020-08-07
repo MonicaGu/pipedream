@@ -55,7 +55,7 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
-parser.add_argument('--print-freq', '-p', default=10, type=int,
+parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--fp16', action='store_true',
                     help='train model in fp16 precision')
@@ -96,6 +96,7 @@ parser.add_argument('--recompute', action='store_true',
 # by not applying updates every minibatch.
 parser.add_argument('--macrobatch', action='store_true',
                     help='Macrobatch updates to save memory')
+parser.add_argument('--world_size',  type=int, help='world size in the cluster')
 
 best_prec1 = 0
 
@@ -107,7 +108,8 @@ def is_first_stage():
 def is_last_stage():
     return args.stage is None or (args.stage == (args.num_stages-1))
 
-def receive_message(socket):
+def receive_message(socket, sem_next):
+    sem_next.release()
     while True:
         data = socket.recv(1024);
         if not data:
@@ -119,14 +121,14 @@ def receive_message(socket):
             print("finish training")
             socket.close()
             break
-        """
         elif data.split(":")[0] == "config":
-            config = config_list[int(data.split(":")[1])]
-            model = model_list[int(data.split(":")[1])]
-            sem_load.release()
+            #config = config_list[int(data.split(":")[1])]
+            #model = model_list[int(data.split(":")[1])]
+            #sem_load.release()
+            continue
         else:
             sem_next.release()
-        """
+        
 
 # Synthetic Dataset class.
 class SyntheticDataset(torch.utils.data.dataset.Dataset):
@@ -150,7 +152,8 @@ def main():
     tcpCliSock = socket(AF_INET, SOCK_STREAM)
     tcpCliSock.connect(Addr)
     print("connected with master")
-    t = threading.Thread(target=receive_message, args=(tcpCliSock,))
+    sem_next = threading.Semaphore(0) # sync between ranks
+    t = threading.Thread(target=receive_message, args=(tcpCliSock,sem_next))
     t.start()
 
     torch.cuda.set_device(args.local_rank)
@@ -222,7 +225,8 @@ def main():
         num_ranks_in_server=args.num_ranks_in_server,
         verbose_freq=args.verbose_frequency,
         model_type=runtime.IMAGE_CLASSIFICATION,
-        enable_recompute=args.recompute)
+        enable_recompute=args.recompute,
+        world_size=args.world_size)
 
     # stage needed to determine if current stage is the first stage
     # num_stages needed to determine if current stage is the last stage
@@ -253,16 +257,20 @@ def main():
         print("=> loaded checkpoint '{}' (epoch {})"
                 .format(checkpoint_file_path, checkpoint['epoch']))
 
-    optimizer = sgd.SGDWithWeightStashing(r.modules(), r.master_parameters,
-                                          r.model_parameters, args.loss_scale,
-                                          num_versions=num_versions,
-                                          lr=args.lr,
-                                          momentum=args.momentum,
-                                          weight_decay=args.weight_decay,
-                                          verbose_freq=args.verbose_frequency,
-                                          macrobatch=args.macrobatch)
+    if r.model_parameters is None:
+        print("No module to be trained on this rank.")
+        optimizer = None
+    else:
+        optimizer = sgd.SGDWithWeightStashing(r.modules(), r.master_parameters,
+                                              r.model_parameters, args.loss_scale,
+                                              num_versions=num_versions,
+                                              lr=args.lr,
+                                              momentum=args.momentum,
+                                              weight_decay=args.weight_decay,
+                                              verbose_freq=args.verbose_frequency,
+                                              macrobatch=args.macrobatch)
 
-    if args.resume:
+    if args.resume and optimizer is not None:
         optimizer.load_state_dict(checkpoint['optimizer'])
 
     cudnn.benchmark = True
@@ -345,33 +353,42 @@ def main():
         assert args.start_epoch > 0
         validate(val_loader, r, args.start_epoch-1)
 
+    sem_next.acquire()
+
     for epoch in range(args.start_epoch, args.epochs):
-        if distributed_sampler:
-            train_sampler.set_epoch(epoch)
+        if r.stage != -1:
+            if distributed_sampler:
+                train_sampler.set_epoch(epoch)
 
-        # train or run forward pass only for one epoch
-        if args.forward_only:
-            validate(val_loader, r, epoch)
-        else:
-            train(train_loader, r, optimizer, epoch)
+            # train or run forward pass only for one epoch
+            if args.forward_only:
+                validate(val_loader, r, epoch)
+            else:
+                train(train_loader, r, optimizer, epoch)
 
-            # evaluate on validation set
-            prec1 = validate(val_loader, r, epoch)
-            if r.stage != r.num_stages: prec1 = 0
+                # evaluate on validation set
+                prec1 = validate(val_loader, r, epoch)
+                if r.stage != r.num_stages: prec1 = 0
 
-            # remember best prec@1 and save checkpoint
-            best_prec1 = max(prec1, best_prec1)
+                # remember best prec@1 and save checkpoint
+                best_prec1 = max(prec1, best_prec1)
 
-            should_save_checkpoint = args.checkpoint_dir_not_nfs or r.rank_in_stage == 0
-            if args.checkpoint_dir and should_save_checkpoint:
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': r.state_dict(),
-                    'best_prec1': best_prec1,
-                    'optimizer' : optimizer.state_dict(),
-                }, args.checkpoint_dir, r.stage)
-        tcpCliSock.send((str(args.rank) + ":train:" + str(epoch)).encode('utf-8'))
+                should_save_checkpoint = args.checkpoint_dir_not_nfs or r.rank_in_stage == 0
+                if args.checkpoint_dir and should_save_checkpoint:
+                    save_checkpoint({
+                        'epoch': epoch + 1,
+                        'arch': args.arch,
+                        'state_dict': r.state_dict(),
+                        'best_prec1': best_prec1,
+                        'optimizer' : optimizer.state_dict(), # To be fixed when optimizer is None
+                    }, args.checkpoint_dir, r.stage)
+        message = str(args.rank) + ":tra:" + str(epoch)
+        tcpCliSock.send(str(len(message)).encode('utf-8'))
+        tcpCliSock.send((message).encode('utf-8')) #train
+        sem_next.acquire()
+    message = str(args.rank) + ":fin:"
+    tcpCliSock.send(str(len(message)).encode('utf-8'))
+    tcpCliSock.send((message).encode('utf-8')) # finish
 
 
 def train(train_loader, r, optimizer, epoch):
@@ -384,6 +401,7 @@ def train(train_loader, r, optimizer, epoch):
     n = r.num_iterations(loader_size=len(train_loader))
     if args.num_minibatches is not None:
         n = min(n, args.num_minibatches)
+    n = 20 # for test only
     r.train(n)
     if not is_first_stage(): train_loader = None
     r.set_loader(train_loader)
@@ -409,7 +427,8 @@ def train(train_loader, r, optimizer, epoch):
         r.run_forward()
 
         # Adjust learning rate
-        adjust_learning_rate(optimizer, epoch, args.epochs, r, args.lr_policy, i, n)
+        if optimizer is not None:
+            adjust_learning_rate(optimizer, epoch, args.epochs, r, args.lr_policy, i, n)
 
         if is_last_stage():
             # measure accuracy and record loss
@@ -449,20 +468,25 @@ def train(train_loader, r, optimizer, epoch):
         # perform backward pass
         if args.fp16:
             r.zero_grad()
-        else:
+        elif optimizer is not None:
             optimizer.zero_grad()
-        optimizer.load_old_params()
+        if optimizer is not None:
+            optimizer.load_old_params()
         r.run_backward()
-        optimizer.load_new_params()
-        optimizer.step()
+        if optimizer is not None:
+            optimizer.load_new_params()
+        if optimizer is not None:
+            optimizer.step()
 
     # finish remaining backward passes
     for i in range(num_warmup_minibatches):
-        optimizer.zero_grad()
-        optimizer.load_old_params()
+        if optimizer is not None:
+            optimizer.zero_grad()
+            optimizer.load_old_params()
         r.run_backward()
-        optimizer.load_new_params()
-        optimizer.step()
+        if optimizer is not None:
+            optimizer.load_new_params()
+            optimizer.step()
 
     # wait for all helper threads to complete
     r.wait()
@@ -481,6 +505,7 @@ def validate(val_loader, r, epoch):
     n = r.num_iterations(loader_size=len(val_loader))
     if args.num_minibatches is not None:
         n = min(n, args.num_minibatches)
+    n = 20 # for test only
     r.eval(n)
     if not is_first_stage(): val_loader = None
     r.set_loader(val_loader)

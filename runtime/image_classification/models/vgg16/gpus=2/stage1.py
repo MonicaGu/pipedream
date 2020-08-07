@@ -30,13 +30,13 @@ class Stage1(torch.nn.Module):
         self.layer21 = torch.nn.Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         self.layer22 = torch.nn.ReLU(inplace=True)
         self.layer23 = torch.nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
-        self.layer26 = torch.nn.Linear(in_features=25088, out_features=4096, bias=True)
+        self.layer26 = torch.nn.Linear(in_features=512, out_features=256, bias=True)
         self.layer27 = torch.nn.ReLU(inplace=True)
         self.layer28 = torch.nn.Dropout(p=0.5)
-        self.layer29 = torch.nn.Linear(in_features=4096, out_features=4096, bias=True)
+        self.layer29 = torch.nn.Linear(in_features=256, out_features=256, bias=True)
         self.layer30 = torch.nn.ReLU(inplace=True)
         self.layer31 = torch.nn.Dropout(p=0.5)
-        self.layer32 = torch.nn.Linear(in_features=4096, out_features=1000, bias=True)
+        self.layer32 = torch.nn.Linear(in_features=256, out_features=10, bias=True)
 
         self._initialize_weights()
 

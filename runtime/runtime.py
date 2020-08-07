@@ -47,7 +47,7 @@ class StageRuntime:
                  training_tensor_dtypes, inputs_module_destinations,
                  target_tensor_names, configuration_maps, master_addr,
                  rank, local_rank, num_ranks_in_server, verbose_freq,
-                 model_type, enable_recompute=False):
+                 model_type, world_size, enable_recompute=False):
         # Metadata needed for forward and backward pass within this stage.
         self.tensors = []
         self.gradients = {}
@@ -59,6 +59,7 @@ class StageRuntime:
         self.training_tensor_dtypes = training_tensor_dtypes
         self.model_type = model_type
         self.target_tensor_names = target_tensor_names
+        self.world_size = world_size
 
         self.initialize(model, inputs_module_destinations, configuration_maps,
                         master_addr, rank, local_rank, num_ranks_in_server)
@@ -140,9 +141,18 @@ class StageRuntime:
 
             # Now, use this mapping to determine the modules contained in
             # each stage.
-            assert 0 <= self.rank < len(rank_to_stage_map)
+            assert 0 <= self.rank
             self.num_ranks = len(rank_to_stage_map)
             self.num_stages = len(stage_to_module_map)
+
+            # If there is no module on this rank
+            if self.rank >= len(rank_to_stage_map):
+                self.modules_with_dependencies = ModulesWithDependencies([])
+                self.master_parameters = []
+                self.model_parameters = None
+                self.comm_handler = None
+                self.stage = -1
+                return
             self.stage = rank_to_stage_map[self.rank]
             self.rank_in_stage = stage_to_rank_map[self.stage].index(self.rank)
             self.num_ranks_in_stage = len(stage_to_rank_map[self.stage])
@@ -488,6 +498,10 @@ class StageRuntime:
     def run_forward(self, recompute_step=False):
         """Run forward pass.
         """
+        # No module to be trained on this rank
+        if self.stage == -1:
+            return
+
         # Receive tensors from previous worker.
         self.receive_tensors_forward()
         tensors = self.tensors[-1]
@@ -546,6 +560,10 @@ class StageRuntime:
             self.loss = 1
 
     def run_backward(self):
+        # If no module to be trained on this rank
+        if self.stage == -1:
+            return
+
         # Receive input gradients needed for backward pass.
         self.receive_tensors_backward()
         # Backward pass through modules in reverse order.
