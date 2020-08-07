@@ -25,7 +25,7 @@ class Stage0(torch.nn.Module):
         self.layer17 = torch.nn.ReLU(inplace=True)
         self.layer18 = torch.nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
 
-        self._initialize_weights()
+        #self._initialize_weights()
 
     def forward(self, input0):
         out0 = input0.clone()

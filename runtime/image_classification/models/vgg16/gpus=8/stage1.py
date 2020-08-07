@@ -23,7 +23,7 @@ class Stage1(torch.nn.Module):
         self.layer16 = torch.nn.ReLU(inplace=True)
         self.layer17 = torch.nn.Dropout(p=0.5)
         self.layer18 = torch.nn.Linear(in_features=4096, out_features=1000, bias=True)
-        self._initialize_weights()
+        #self._initialize_weights()
 
     def _initialize_weights(self):
         for m in self.modules():

@@ -7,8 +7,10 @@ import importlib
 import json
 import os
 import shutil
+from socket import *
 import sys
 import time
+import threading
 
 import torch
 from torch.autograd import Variable
@@ -61,6 +63,8 @@ parser.add_argument('--loss_scale', type=float, default=1,
                     help='static loss scale, positive power of 2 to improve fp16 convergence')
 parser.add_argument('--master_addr', default=None, type=str,
                     help="IP address of master (machine with rank 0)")
+parser.add_argument('--autoscaling_addr', default='localhost', type=str,
+                    help="IP address of autoscaling master")
 parser.add_argument('--config_path', default=None, type=str,
                     help="Path of configuration file")
 parser.add_argument('--no_input_pipelining', action='store_true',
@@ -103,6 +107,27 @@ def is_first_stage():
 def is_last_stage():
     return args.stage is None or (args.stage == (args.num_stages-1))
 
+def receive_message(socket):
+    while True:
+        data = socket.recv(1024);
+        if not data:
+            continue;
+        data = data.decode('utf-8')
+        print("\n" + str(time.time()))
+        print("******data received: ", data)
+        if data[:6] == "finish":
+            print("finish training")
+            socket.close()
+            break
+        """
+        elif data.split(":")[0] == "config":
+            config = config_list[int(data.split(":")[1])]
+            model = model_list[int(data.split(":")[1])]
+            sem_load.release()
+        else:
+            sem_next.release()
+        """
+
 # Synthetic Dataset class.
 class SyntheticDataset(torch.utils.data.dataset.Dataset):
     def __init__(self, input_size, length, num_classes=1000):
@@ -120,6 +145,14 @@ def main():
     global args, best_prec1
     args = parser.parse_args()
 
+    # connect to master
+    Addr = (args.autoscaling_addr, 8080)
+    tcpCliSock = socket(AF_INET, SOCK_STREAM)
+    tcpCliSock.connect(Addr)
+    print("connected with master")
+    t = threading.Thread(target=receive_message, args=(tcpCliSock,))
+    t.start()
+
     torch.cuda.set_device(args.local_rank)
 
     # define loss function (criterion)
@@ -134,7 +167,8 @@ def main():
     if args.arch == 'inception_v3':
         input_size = [args.batch_size, 3, 299, 299]
     else:
-        input_size = [args.batch_size, 3, 224, 224]
+        #input_size = [args.batch_size, 3, 224, 224]
+        input_size = [args.batch_size, 3, 32, 32]
     training_tensor_shapes = {"input0": input_size, "target": [args.batch_size]}
     dtypes = {"input0": torch.int64, "target": torch.int64}
     inputs_module_destinations = {"input": 0}
@@ -234,6 +268,7 @@ def main():
     cudnn.benchmark = True
 
     # Data loading code
+    """
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
@@ -274,6 +309,14 @@ def main():
             transforms.ToTensor(),
             normalize,
         ]))
+    """
+    transform = transforms.Compose([ transforms.ToTensor(),
+    transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))])
+
+    train_dataset = datasets.CIFAR10(root='/home/jxt/test/ScalableModelParallel/model_parallel/CIFAR10data', train=True,
+        download=True, transform=transform)
+    val_dataset = datasets.CIFAR10(root='/home/jxt/test/ScalableModelParallel/model_parallel/CIFAR10data', train=False, 
+        download=True, transform=transform)
 
     distributed_sampler = False
     train_sampler = None
@@ -328,6 +371,7 @@ def main():
                     'best_prec1': best_prec1,
                     'optimizer' : optimizer.state_dict(),
                 }, args.checkpoint_dir, r.stage)
+        tcpCliSock.send((str(args.rank) + ":train:" + str(epoch)).encode('utf-8'))
 
 
 def train(train_loader, r, optimizer, epoch):

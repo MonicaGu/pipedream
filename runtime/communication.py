@@ -648,7 +648,7 @@ def _recv(tensor_name, src_rank, tensor_shape=None, dtype=torch.float32,
     if sub_process_group is not None:
         # Receive tensor shape.
         received_tensor_shape = torch.zeros(len(tensor_shape),
-                                            dtype=torch.int)
+                                            dtype=torch.int).cuda()
         dist.broadcast(tensor=received_tensor_shape,
                        src=src_rank,
                        group=sub_process_group)
@@ -691,7 +691,7 @@ def _send(tensor, tensor_name, src_rank, dst_rank, tag, sub_process_group=None):
         assert tensor.is_cuda
 
         # Send tensor shape.
-        tensor_shape = torch.tensor(tensor.shape, dtype=torch.int)
+        tensor_shape = torch.tensor(tensor.shape, dtype=torch.int).cuda()
         dist.broadcast(tensor=tensor_shape, src=src_rank,
                       group=sub_process_group)
 

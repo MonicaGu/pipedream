@@ -29,7 +29,7 @@ class Stage1(torch.nn.Module):
         self.layer24 = torch.nn.Dropout(p=0.5)
         self.layer25 = torch.nn.Linear(in_features=4096, out_features=1000, bias=True)
 
-        self._initialize_weights()
+        #self._initialize_weights()
 
     def forward(self, input0):
         out0 = input0.clone()

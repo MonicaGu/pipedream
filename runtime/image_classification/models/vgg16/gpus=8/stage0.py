@@ -29,7 +29,7 @@ class Stage0(torch.nn.Module):
         self.layer21 = torch.nn.Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         self.layer22 = torch.nn.ReLU(inplace=True)
         self.layer23 = torch.nn.Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
-        self._initialize_weights()
+        #self._initialize_weights()
 
     def _initialize_weights(self):
         for m in self.modules():
